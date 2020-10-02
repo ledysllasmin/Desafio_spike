@@ -1,0 +1,529 @@
+---
+title: "Desafio_Spike"
+author: "Ledys Salazar"
+date: "26-09-2020"
+output: html_document
+params:
+  Detalle: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE)
+```
+
+
+# Contexto
+<hr>
+
+El Sistema Electrico Nacional reúne a distintas empresas que en su conjunto se encargan de la generación, transmisión, distribución y consumo de energía en Chile. Para lograr esto, existen instalaciones que cumplen distintas funciones en el sistema, incluyendo:
+
+* **Centrales eléctricas generadoras.**
+* **Líneas de transmisión troncal.**
+* **Líneas de subtransmisión y adicionales.**
+* **Subestaciones eléctricas.**
+* **Barras de consumo.**
+
+El Coordinador Eléctrico Nacional es el organismo encargado de coordinar la operación de las instalaciones del Sistema Eléctrico Nacional, con el objetivo de garantizar la operación más económica del sistema, preservar su seguridad y garantizar el acceso abierto a los sistemas de transimisón. Dentro de sus funciones debe programar la generación de electricidad, con el objetivo de minimizar el costo marginal.
+
+# Herramientas
+<hr>
+
+Para abordar el desafio se utilizará el software R, la versión y los package utilizados para su correcta reproducibilidad se detallan a continuación.
+
+
+```{r}
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(patchwork)
+library(kableExtra)
+
+sessionInfo()
+
+```
+
+# Input
+
+Los input utilizados son:
+
+* Retiros de energía [MWh] a nivel de barra y hora. demanda_real.csv
+
+https://storage.googleapis.com/sistema_electrico_chile/demanda_real.csv
+
+* Costos marginales reales [USD/MWh] a nivel de barra y hora (cada fila es una barra y día-hora). costo_marginal_real.csv 
+
+https://storage.googleapis.com/sistema_electrico_chile/costo_marginal_real.csv
+
+* Costos marginales programados [USD/MWh] (por el SIC) a nivel de barra y hora (cada fila es una barra y día-hora). costo_marginal_programado.csv 
+
+https://storage.googleapis.com/sistema_electrico_chile/costo_marginal_programado.csv
+
+* Base para entrenar modelos. base_para_predicción.csv 
+
+https://storage.googleapis.com/sistema_electrico_chile/base_para_prediccion.csv
+
+# Preguntas
+
+### **1. Costos marginales**
+
+```{r}
+
+cat("Carga el archivo costo_marginal_real.csv. Estos son los costos marginales reales observados.")
+
+costo_marginal_real <- list()
+costo_marginal_real[[1]] <- read_csv("C:/Drive/Desafio_Spike/data/base/costo_marginal_real.csv")
+
+# Carga el archivo costo_marginal_programado.csv. Estos son los costos marginales previstos por el sistema.
+
+costo_marginal_programado <- list()
+costo_marginal_programado[[1]] <- read_csv("C:/Drive/Desafio_Spike/data/base/costo_marginal_programado.csv")
+
+
+
+# Chequeo de input
+scales::number(nrow(costo_marginal_real[[1]]), big.mark = ",")
+scales::number(nrow(costo_marginal_programado[[1]]), big.mark = ",")
+
+# Detalle input
+glimpse(costo_marginal_real[[1]])
+glimpse(costo_marginal_programado[[1]])
+
+# Chequeo duplicados en costo_marginal_real
+costo_marginal_real[[1]] %>%
+  group_by(barra_mnemotecnico,
+           barra_referencia_mnemotecnico,
+           fecha,
+           hora) %>%
+  dplyr::filter(n()>1)
+
+# No tiene duplicados
+
+
+# Chequeo duplicados en costo_marginal_programado
+costo_marginal_programado[[1]] %>%
+  group_by(mnemotecnico_barra,
+           nombre_barra,
+           fecha,
+           hora) %>% 
+   dplyr::filter(n()>1)
+
+# Presenta duplicados
+# El plan de acción considerando el supuesto que es una actualización de información, será contemplar el como costo minimo y costo maximo, por lo tanto el costo será calculando mediante el promedio de ambos.
+
+
+# Chequeo consistencia de nombre en costo_marginal_real
+table(nchar(costo_marginal_real[[1]]$barra_mnemotecnico))
+
+# Chequeo consistencia de nombre en costo_marginal_programado
+costo_marginal_programado[[1]] %>%
+  group_by(nombre_barra) %>% 
+  summarise(n=n())
+
+ #   nombre_barra                            n
+ #   <chr>                               <int>
+ #   -                                  180115
+
+costo_marginal_programado[[1]] %>%
+  group_by(mnemotecnico_barra) %>% 
+  summarise(n=n())
+
+   # mnemotecnico_barra      n
+   # <chr>               <int>
+   # -                  180115
+
+
+# Existen nombres con "-", estos registros serán omitidos para el analisis
+
+
+# Chequeo variable hora en costo_marginal_real
+table(costo_marginal_real[[1]]$hora)
+
+# Chequeo variable hora en costo_marginal_programado
+table(costo_marginal_programado[[1]]$hora)
+
+# Evidenciamos hora 25 en ambos dataset, la cantidad de registros respecto a el resto de horas es distinto, por lo tanto omitiremos estos registros para el analisis.
+
+
+costo_marginal_real[[2]] <- 
+  costo_marginal_real[[1]] %>% 
+  dplyr::filter(hora!=25) %>% 
+  mutate(fecha_hora=ymd_h(paste0(fecha," ",hora))) 
+
+costo_marginal_programado[[2]] <- 
+  costo_marginal_programado[[1]] %>%
+  dplyr::filter(hora!=25) %>% 
+  dplyr::filter(nombre_barra!="-") %>% 
+  mutate(fecha_hora=ymd_h(paste0(fecha," ",hora))) 
+  
+
+DUP_costo_marginal_programado <- 
+costo_marginal_programado[[2]] %>% 
+  group_by(mnemotecnico_barra,
+           nombre_barra,
+           fecha,
+           hora) %>% 
+   dplyr::filter(n()>1) %>%
+  mutate(Marca=case_when(costo==min(costo)~"MIN",TRUE~"MAX")) %>%
+  pivot_wider(names_from = Marca,values_from = costo) %>%
+  ungroup() %>% 
+  rowwise() %>%
+  mutate(costo=mean(MIN,MAX))
+  
+
+
+DUP_costo_marginal_programado %>% 
+  dplyr::filter(nombre_barra=="BA S/E SAUZAL 110KV SECCION 1") %>% 
+  ggplot() +
+  geom_line(aes(x=fecha_hora,y=costo), col="red", alpha=0.3) +
+  geom_line(aes(x=fecha_hora,y=MIN), col="blue", alpha=0.3) +
+  geom_line(aes(x=fecha_hora,y=MAX), col="black", alpha=0.3)
+
+
+costo_marginal_programado[[3]] <-
+  costo_marginal_programado[[2]] %>%
+  anti_join(DUP_costo_marginal_programado) %>%
+  mutate(MIN=costo,MAX=costo) %>%
+  bind_rows(DUP_costo_marginal_programado)
+  
+  
+# Haz un merge del costos marginal real con el costo marginal programado a nivel de barra (Ayuda: la columna de join no se llama igual en ambas bases! Los datos venían así del SIC). Llama a esta nueva base costo_marginal.
+
+
+names(costo_marginal_real[[2]])
+names(costo_marginal_programado[[3]])
+
+costo_marginal <- list()
+costo_marginal[[1]] <- costo_marginal_real[[2]] %>%
+  left_join(costo_marginal_programado[[3]],
+            by=c("barra_mnemotecnico"="mnemotecnico_barra",
+                 "nombre"="nombre_barra",
+                 "fecha"="fecha",
+                 "hora"="hora",
+                 "fecha_hora"="fecha_hora")) %>% 
+  rename(costo_programado=costo)
+
+
+
+# Chequeo costo programado en CLP o USD
+costo_marginal[[1]] %>%
+  dplyr::filter(nombre=="BA S/E SAN JAVIER 66KV")  %>%
+  ggplot() +
+  geom_line(aes(x=fecha_hora, y=costo_en_pesos), col="blue") +
+  geom_line(aes(x=fecha_hora, y=costo_en_dolares), col="red") +
+  geom_line(aes(x=fecha_hora, y=costo_programado), col="yellow")
+
+# Considerando el gráfico asumimos que los costos programados están en moneda USD  
+
+
+```
+
+Analisis exploratorio
+
+* ¿Qué puedes decir de las distintas variables?
+```{r}
+glimpse(costo_marginal[[1]])
+```
+
+
+* ¿Cómo distribuyen? 
+<br>
+```{r}
+
+costo_marginal[[1]] %>% 
+  ggplot() +
+  geom_histogram(aes(x=costo_en_pesos))
+
+costo_marginal[[1]] %>% 
+  ggplot() +
+  geom_histogram(aes(x=costo_en_dolares))
+
+costo_marginal[[1]] %>% 
+  ggplot() +
+  geom_histogram(aes(x=costo_programado))
+
+```
+
+
+* ¿Para cuántas barras se programa el costo?
+```{r}
+
+costo_marginal[[1]] %>% 
+  dplyr::filter(!is.na(costo_programado)) %>%
+  select(barra_mnemotecnico) %>% 
+  distinct() %>% nrow()
+
+```
+
+
+
+* ¿Qué porcentaje es del total de barras que puedes observar en la base?  
+```{r}
+
+
+percent(costo_marginal[[1]] %>% 
+  dplyr::filter(!is.na(costo_programado)) %>%
+  select(barra_mnemotecnico) %>% 
+  distinct() %>% nrow() /
+  costo_marginal[[1]] %>% 
+  select(barra_mnemotecnico) %>% 
+  distinct() %>% nrow() )
+  
+
+```
+
+
+
+
+
+### **2. Construcción de variables**
+
+
+
+
+```{r}
+
+# Construye las siguientes variables para la base que creaste en el punto anterior:
+# 
+# * desviación: la diferencia entre el costo real y el costo programado
+# 
+# * desviación_pct: la misma desviación, pero en porcentaje
+# 
+# * desviacion_cat: una variable categórica que vale 1 si la desviación_pct absoluta es mayor a 15% (esto es, si es menor a -15% o mayor a 15%)
+
+costo_marginal[[2]] <-
+  costo_marginal[[1]] %>%
+  mutate(
+    desviacion = costo_en_dolares - costo_programado,
+    desviacion_pct = desviacion / costo_en_dolares,
+    desviacion_cat = case_when(abs(desviacion_pct) > 0.15 ~ 1,
+                               TRUE ~ 0)
+  )
+
+glimpse(costo_marginal[[2]] %>% select(desviacion, desviacion_pct, desviacion_cat))
+
+```
+
+Describe la variable desviacion_cat . Qué puedes observar? Cambia a través del tiempo?
+
+```{r}
+costo_marginal[[2]] %>%
+  dplyr::filter(nombre=="BA S/E SAN JAVIER 66KV")  %>%
+  ggplot() +
+  geom_point(aes(x=fecha_hora, y=desviacion_cat), col="blue")
+```
+
+Se puede observar que cambia en el tiempo.
+
+
+
+
+## 3. Visualización de datos
+Crea la siguiente función: def time_plot_costo_barra(codigo_barra, fecha_inicial, fecha_final)
+
+que tome como input el código de una barra y haga un plot en el tiempo del costo marginal real y del costo marginal programado. El eje x debe ser el tiempo. fecha_inicial y fecha_final_ dan los límites de este plot. Úsa esta función para plotear algunas barras. Acá hay un ejemplo:
+
+
+```{r}
+
+# Ejemolo
+# codigo_barra <- "BA S/E SAN JAVIER 66KV"
+# fecha_inicial <- "2019-04-01"
+# fecha_final <- "2019-04-03"
+
+time_plot_costo_barra <- function(codigo_barra, fecha_inicial, fecha_final){
+  costo_marginal[[2]] %>%
+  dplyr::filter(nombre==codigo_barra,
+                fecha>=as.Date(fecha_inicial),
+                fecha<=as.Date(fecha_final))  %>%
+  rename(cmg_real=costo_en_dolares,cmg_prog=costo_programado) %>%
+  pivot_longer(
+   cols = starts_with("cmg_"),
+   names_to = "CMG",
+   values_to = "costo") %>%
+  ggplot() +
+  geom_line(aes(x=fecha_hora, y=costo, col=CMG)) +
+  theme_minimal()
+
+}
+
+time_plot_costo_barra("BA S/E SAN JAVIER 66KV","2019-04-01","2019-04-07")
+
+names(costo_marginal[[2]])
+
+costo_marginal[[2]] %>%
+  rename(cmg_real=costo_en_dolares,cmg_prog=costo_programado) %>%
+  group_by(barra_mnemotecnico,barra_referencia_mnemotecnico,
+           nombre) %>% summarise(sum_cmg_real=sum(cmg_real), n=n()) %>%
+  dplyr::filter(sum(sum_cmg_real)==0)
+
+
+costo_marginal[[3]] <-
+  costo_marginal[[2]] %>%
+  rename(cmg_real=costo_en_dolares,cmg_prog=costo_programado) %>%
+  group_by(barra_mnemotecnico,barra_referencia_mnemotecnico,
+           nombre) %>% dplyr::filter(sum(cmg_real)!=0)
+
+nrow(costo_marginal[[3]])-nrow(costo_marginal[[2]])
+
+```
+
+# 4. Base para los modelos
+Carga la base base_para_predicción.csv. Esta será la base principal para las siguientes preguntas.
+
+En rasgos generales, ¿Qué puedes decir de los datos? (dimensiones, tipo de datos, variables categóricas, variables numéricas, fechas).
+A partir de la variable fecha, crea nuevas variables para el año, mes, semana del año, dia del calendario, dia de la semana y una variable que indique si el dia corresponde a un día de semana o fin de semana. Estas features/variables te servirán para entrenar el modelo.
+Implementa una función que para una subestación y una variable, grafique múltiples series de tiempo diarias correspondientes a una lista de fechas. Para esto, la función debe recibir como argumentos: código de una subestación, una variable (serie numérica), y una lista de fechas (año-mes-día). Por ejemplo: para la subestación SE005T002 y la variable gen_solar_total_mwh, la función debe graficar los perfiles diarios de generación solar por hora para las fechas '2019-01-10', '2019-02-10' y '2019-03-10'.
+Grafica la curva de generación solar, por hora, en la subestación SE005T002 para las fechas del 10, 11, 12, 13 y 14 de enero de 2019. Haz lo mismo para la subestación SE127T005. Que podrías decir, en términos generales, sobre la generación solar y las dos subestaciones mencionadas, basados en estos dos gráficos?
+Grafica la curva de generación térmica, por hora, en la subestación SE020G213 para los días 14, 15, 16 y 17 de mayo de 2019. Haz lo mismo para la subestación SE106G216. Que podrías decir, en términos generales, sobre la generación térmica en esta subestación con respecto a este gráfico?
+
+```{r}
+
+base_para_prediccion <- list()
+
+base_para_prediccion[[1]] <- read_csv("C:/Drive/Desafio_Spike/data/base/base_para_prediccion.csv",
+                                      col_types =
+                                        cols(gen_hidraulica_total_mwh = "c",
+                                             gen_eolica_total_mwh= "c",
+                                             gen_geotermica_total_mwh="c"))
+
+
+# En rasgos generales, ¿Qué puedes decir de los datos? (dimensiones, tipo de datos, variables categóricas, variables numéricas, fechas).
+
+glimpse(base_para_prediccion[[1]])
+
+# partir de la variable fecha, crea nuevas variables para el año, mes, semana del año, dia del calendario, dia de la semana y una variable que indique si el dia corresponde a un día de semana o fin de semana. Estas features/variables te servirán para entrenar el modelo.
+
+
+# pasamos los datos a fecha para evidencia si existe una fecha no valida
+
+base_para_prediccion[[2]] <-
+  base_para_prediccion[[1]] %>% mutate(
+    fecha2 = ymd(str_extract(fecha, "\\d{4}-\\d{2}-\\d{2}")),
+    year = year(fecha2),
+    month = month(fecha2),
+    week = week(fecha2),
+    day = day(fecha2),
+    yday = yday(fecha2),
+    wday = wday(fecha2, label = TRUE, abbr = FALSE),
+    wday2 = wday(fecha2, label = FALSE)
+  ) %>%
+  # select(year, month, week,day,yday,wday) %>%
+  mutate(fin_de_semana = ifelse(str_detect(wday, "sábado|domingo"), 1, 0))
+# dplyr::filter(!str_detect(wday,"sábado|domingo"))
+
+
+# Implementa una función que para una subestación y una variable, grafique múltiples series de tiempo diarias correspondientes a una lista de fechas. Para esto, la función debe recibir como argumentos: código de una subestación, una variable (serie numérica), y una lista de fechas (año-mes-día). Por ejemplo: para la subestación SE005T002 y la variable gen_solar_total_mwh, la función debe graficar los perfiles diarios de generación solar por hora para las fechas '2019-01-10', '2019-02-10' y '2019-03-10'
+
+
+table(is.na(base_para_prediccion[[2]]$gen_eolica_total_mwh))
+table(is.na(base_para_prediccion[[2]]$gen_geotermica_total_mwh))
+table(is.na(base_para_prediccion[[2]]$gen_hidraulica_total_mwh))
+table(is.na(base_para_prediccion[[2]]$gen_solar_total_mwh))
+table(is.na(base_para_prediccion[[2]]$gen_termica_total_mwh))
+
+# base_para_prediccion[[2]] %>% View()
+
+# fechas.f <- c('2019-01-21', '2019-02-15', '2019-05-10')
+# nombre.f <- "SE003T011"
+# variable.f <- "gen_hidraulica_total_mwh"
+
+function_graph.1 <- function(nombre.f,fechas.f,variable.f){
+
+  base_para_prediccion[[2]] %>%
+  dplyr::filter(nemotecnico_se==nombre.f,
+                fecha2 %in% ymd(fechas.f) ) %>%
+  ggplot() +
+  geom_line(aes(x=hora,y=as.numeric(eval(parse(text=variable.f))),
+                col=as.character(fecha2)), na.rm = T) +
+  theme_minimal()
+}
+
+# Grafica la curva de generación solar, por hora, en la subestación SE005T002 para las fechas del 10, 11, 12, 13 y 14 de enero de 2019. Haz lo mismo para la subestación SE127T005. Que podrías decir, en términos generales, sobre la generación solar y las dos subestaciones mencionadas, basados en estos dos gráficos?
+
+function_graph.1(nombre.f="SE005T002",
+                 fechas.f=c(paste0("2019-01-",10:14)),variable.f="gen_solar_total_mwh") /
+
+function_graph.1(nombre.f="SE127T005",
+                 fechas.f=c(paste0("2019-01-",10:14)),variable.f="gen_solar_total_mwh")
+
+
+# la estación SE005T002 es más regular en la generación de energia en comparación con la estación SE127T005
+
+
+# Grafica la curva de generación térmica, por hora, en la subestación SE020G213 para los días 14, 15, 16 y 17 de mayo de 2019. Haz lo mismo para la subestación SE106G216. Que podrías decir, en términos generales, sobre la generación térmica en esta subestación con respecto a este gráfico?
+
+function_graph.1(nombre.f="SE020G213",
+                 fechas.f=c(paste0("2019-05-",14:17)),variable.f="gen_termica_total_mwh") /
+
+function_graph.1(nombre.f="SE106G216",
+                 fechas.f=c(paste0("2019-05-",14:17)),variable.f="gen_termica_total_mwh")
+
+```
+
+
+
+## 5. Predicción de desviaciones del costo marginal: modelo 1
+Crea una variable target que sea igual a cero cuando la variable cmg_desv_pct esté en el rango [-15,15], e igual uno para cualquier otro caso. Hint: recuerda que existen valores infinitos.
+Ahora crea los siguientes features:
+en_total_mwh: suma de las cinco series de generación.
+lags y estadísticas acumuladas (por ejemplo: promedio, varianza) de las variables que consideres relevantes.
+Entrena un modelo que prediga si existirá una desviación en la hora siguiente. Adecúa la variable target para hacer esto posible.
+¿Cómo le va a tu modelo? ¿En qué métricas te basas y por qué?
+¿Cuales son las variables más importantes que considera este modelo?
+
+```{r}
+# Crea una variable target que sea igual a cero cuando la variable cmg_desv_pct esté en el rango [-15,15], e igual uno para cualquier otro caso. Hint: recuerda que existen valores infinitos.
+
+# Ahora crea los siguientes features:
+# en_total_mwh: suma de las cinco series de generación.
+# lags y estadísticas acumuladas (por ejemplo: promedio, varianza) de las variables que consideres relevantes.
+
+base_para_prediccion[[3]] <-
+  base_para_prediccion[[2]] %>%
+  mutate_at(vars(starts_with("gen_")), as.numeric) %>%
+  mutate(target=ifelse(abs(cmg_desv_pct)<=15,0,1)) %>%
+  # rowwise() %>%
+  mutate(en_total_mwh =
+           rowSums(.[c("gen_eolica_total_mwh",
+                       "gen_geotermica_total_mwh",
+                       "gen_hidraulica_total_mwh",
+                       "gen_solar_total_mwh",
+                       "gen_termica_total_mwh")], na.rm = T))
+
+
+
+
+# Entrena un modelo que prediga si existirá una desviación en la hora siguiente. Adecúa la variable target para hacer esto posible.
+
+base_para_prediccion[[3]] <- base_para_prediccion[[3]] %>%
+  mutate(target2=lead(target))
+
+base_para_prediccion[[3]] %>% select(target, target2)
+
+```
+
+
+
+
+```{r}
+
+# ¿Cómo le va a tu modelo? ¿En qué métricas te basas y por qué?
+# ¿Cuales son las variables más importantes que considera este modelo?
+
+
+# logitMod <- glm(target2 ~ en_total_mwh, data=base_para_prediccion[[3]], family=binomial(link="logit"))
+
+glimpse(base_para_prediccion[[3]])
+
+logitMod <- glm(target2 ~ en_total_mwh + fin_de_semana + month + wday2 + yday + target, data=base_para_prediccion[[3]], family=binomial())
+
+logitMod <- glm(target2 ~ target + fin_de_semana + month + cap_inst_mw + hora , data=base_para_prediccion[[3]], family=binomial())
+
+summary(logitMod)
+
+with(summary(logitMod), 1 - deviance/null.deviance)
+
+
+
+```
+
